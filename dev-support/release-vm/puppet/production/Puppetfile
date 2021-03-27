@@ -1,3 +1,4 @@
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -13,15 +14,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
 
-log4j.rootLogger=WARN,console
-log4j.threshold=WARN
+forge "https://forgeapi.puppetlabs.com"
 
-# console
-log4j.appender.console=org.apache.log4j.ConsoleAppender
-log4j.appender.console.target=System.err
-log4j.appender.console.layout=org.apache.log4j.PatternLayout
-log4j.appender.console.layout.ConversionPattern=%d{ISO8601} %-5p [%t] %c{2}: %m%n
-
-# ZooKeeper will still put stuff at WARN
-log4j.logger.org.apache.zookeeper=ERROR
+mod 'puppet-packages',
+  :git => "https://github.com/greenaar/puppet-packages.git",
+  :ref => '8d6b8a85eea931e4cd045884d5786c1c1ff0df4c'
+mod 'puppetlabs-docker', '3.10.1'
+mod 'puppetlabs-stdlib', '5.2.0'
+mod 'puppetlabs-vcsrepo', '3.1.0'
+mod 'saz-ssh', '6.2.0'

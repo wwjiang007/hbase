@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,32 +15,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.hadoop.hbase;
+package org.apache.hadoop.hbase.master;
 
-import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.hadoop.hbase.HBaseClassTestRule;
+import org.apache.hadoop.hbase.testclassification.MasterTests;
+import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.junit.ClassRule;
+import org.junit.experimental.categories.Category;
 
-/**
- * Logger class that buffers before trying to log to the specified console.
- */
-@InterfaceAudience.Private
-public class AsyncConsoleAppender extends org.apache.log4j.AsyncAppender {
-  private final org.apache.log4j.ConsoleAppender consoleAppender;
+@Category({ MasterTests.class, MediumTests.class })
+public class TestRetainAssignmentOnRestartSplitWithoutZk
+    extends TestRetainAssignmentOnRestart {
 
-  public AsyncConsoleAppender() {
-    super();
-    consoleAppender = new org.apache.log4j.ConsoleAppender(
-      new org.apache.log4j.PatternLayout("%d{ISO8601} %-5p [%t] %c{2}: %m%n"));
-    this.addAppender(consoleAppender);
-  }
-
-  public void setTarget(String value) {
-    consoleAppender.setTarget(value);
-  }
+  @ClassRule
+  public static final HBaseClassTestRule CLASS_RULE =
+      HBaseClassTestRule.forClass(TestRetainAssignmentOnRestartSplitWithoutZk.class);
 
   @Override
-  public void activateOptions() {
-    consoleAppender.activateOptions();
-    super.activateOptions();
+  protected boolean splitWALCoordinatedByZk() {
+    return false;
   }
-
 }

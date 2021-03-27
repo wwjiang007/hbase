@@ -732,6 +732,17 @@ public class AssignmentManager {
     return ProcedureSyncWait.submitProcedure(master.getMasterProcedureExecutor(), proc);
   }
 
+  public Future<byte[]> balance(RegionPlan regionPlan) throws HBaseIOException {
+    ServerName current =
+      this.getRegionStates().getRegionAssignments().get(regionPlan.getRegionInfo());
+    if (!current.equals(regionPlan.getSource())) {
+      LOG.debug("Skip region plan {}, source server not match, current region location is {}",
+        regionPlan, current);
+      return null;
+    }
+    return moveAsync(regionPlan);
+  }
+
   // ============================================================================================
   //  RegionTransition procedures helpers
   // ============================================================================================
@@ -1425,6 +1436,13 @@ public class AssignmentManager {
       this.statTimestamp = EnvironmentEdgeManager.currentTime();
       update(regionStates.getRegionsStateInTransition(), statTimestamp);
       update(regionStates.getRegionFailedOpen(), statTimestamp);
+
+      if (LOG.isDebugEnabled() && ritsOverThreshold != null && !ritsOverThreshold.isEmpty()) {
+        LOG.debug("RITs over threshold: {}",
+          ritsOverThreshold.entrySet().stream()
+            .map(e -> e.getKey() + ":" + e.getValue().getState().name())
+            .collect(Collectors.joining("\n")));
+      }
     }
 
     private void update(final Collection<RegionState> regions, final long currentTime) {

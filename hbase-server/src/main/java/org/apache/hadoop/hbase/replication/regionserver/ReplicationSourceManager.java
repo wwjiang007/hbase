@@ -67,7 +67,6 @@ import org.apache.hadoop.hbase.replication.ReplicationTracker;
 import org.apache.hadoop.hbase.replication.ReplicationUtils;
 import org.apache.hadoop.hbase.replication.SyncReplicationState;
 import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.wal.SyncReplicationWALProvider;
 import org.apache.hadoop.hbase.wal.WAL;
@@ -283,8 +282,7 @@ public class ReplicationSourceManager implements ReplicationListener {
     if (currentReplicators == null || currentReplicators.isEmpty()) {
       return;
     }
-    List<ServerName> otherRegionServers = replicationTracker.getListOfRegionServers().stream()
-        .map(ServerName::valueOf).collect(Collectors.toList());
+    List<ServerName> otherRegionServers = replicationTracker.getListOfRegionServers();
     LOG.info(
       "Current list of replicators: " + currentReplicators + " other RSs: " + otherRegionServers);
 
@@ -999,7 +997,7 @@ public class ReplicationSourceManager implements ReplicationListener {
               wals.add(wal);
             }
             oldsources.add(src);
-            LOG.trace("Added source for recovered queue: " + src.getQueueId());
+            LOG.info("Added source for recovered queue {}", src.getQueueId());
             for (String wal : walsSet) {
               LOG.trace("Enqueueing log from recovered queue for source: " + src.getQueueId());
               src.enqueueLog(new Path(oldLogDir, wal));
@@ -1020,6 +1018,9 @@ public class ReplicationSourceManager implements ReplicationListener {
   public void join() {
     this.executor.shutdown();
     for (ReplicationSourceInterface source : this.sources.values()) {
+      source.terminate("Region server is closing");
+    }
+    for (ReplicationSourceInterface source : this.oldsources) {
       source.terminate("Region server is closing");
     }
   }
@@ -1218,7 +1219,7 @@ public class ReplicationSourceManager implements ReplicationListener {
     // source process. See "4.1 Skip maintaining zookeeper replication queue (offsets/WALs)" in the
     // design doc attached to HBASE-18070 'Enable memstore replication for meta replica' for detail.
     CatalogReplicationSourcePeer peer = new CatalogReplicationSourcePeer(this.conf,
-      this.clusterId.toString(), "meta_" + ServerRegionReplicaUtil.REGION_REPLICA_REPLICATION_PEER);
+      this.clusterId.toString());
     final ReplicationSourceInterface crs = new CatalogReplicationSource();
     crs.init(conf, fs, this, new NoopReplicationQueueStorage(), peer, server, peer.getId(),
       clusterId, walProvider.getWALFileLengthProvider(), new MetricsSource(peer.getId()));

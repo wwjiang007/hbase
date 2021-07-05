@@ -34,7 +34,6 @@ import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.master.LoadBalancer;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.Region;
@@ -43,6 +42,7 @@ import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CommonFSUtils;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
@@ -118,8 +118,7 @@ public class TestBlockReorderMultiBlocks {
 
     MiniHBaseCluster hbm = htu.startMiniHBaseCluster();
     hbm.waitForActiveAndReadyMaster();
-    HRegionServer targetRs = LoadBalancer.isTablesOnMaster(hbm.getConf())? hbm.getMaster():
-      hbm.getRegionServer(0);
+    HRegionServer targetRs = hbm.getRegionServer(0);
 
     // We want to have a datanode with the same name as the region server, so
     //  we're going to get the regionservername, and start a new datanode with this name.
@@ -249,10 +248,10 @@ public class TestBlockReorderMultiBlocks {
     for (int i = 0; i < 10; i++) {
       LocatedBlocks l;
       // The NN gets the block list asynchronously, so we may need multiple tries to get the list
-      final long max = System.currentTimeMillis() + 10000;
+      final long max = EnvironmentEdgeManager.currentTime() + 10000;
       boolean done;
       do {
-        Assert.assertTrue("Can't get enouth replica.", System.currentTimeMillis() < max);
+        Assert.assertTrue("Can't get enouth replica", EnvironmentEdgeManager.currentTime() < max);
         l = getNamenode(dfs.getClient()).getBlockLocations(src, 0, 1);
         Assert.assertNotNull("Can't get block locations for " + src, l);
         Assert.assertNotNull(l.getLocatedBlocks());

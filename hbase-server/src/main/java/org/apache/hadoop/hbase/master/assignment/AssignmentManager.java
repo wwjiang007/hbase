@@ -163,6 +163,31 @@ public class AssignmentManager {
   private final RegionStates regionStates = new RegionStates();
   private final RegionStateStore regionStateStore;
 
+  /**
+   * When the operator uses this configuration option, any version between
+   * the current cluster version and the value of "hbase.min.version.move.system.tables"
+   * does not trigger any auto-region movement. Auto-region movement here
+   * refers to auto-migration of system table regions to newer server versions.
+   * It is assumed that the configured range of versions does not require special
+   * handling of moving system table regions to higher versioned RegionServer.
+   * This auto-migration is done by {@link #checkIfShouldMoveSystemRegionAsync()}.
+   * Example: Let's assume the cluster is on version 1.4.0 and we have
+   * set "hbase.min.version.move.system.tables" as "2.0.0". Now if we upgrade
+   * one RegionServer on 1.4.0 cluster to 1.6.0 (< 2.0.0), then AssignmentManager will
+   * not move hbase:meta, hbase:namespace and other system table regions
+   * to newly brought up RegionServer 1.6.0 as part of auto-migration.
+   * However, if we upgrade one RegionServer on 1.4.0 cluster to 2.2.0 (> 2.0.0),
+   * then AssignmentManager will move all system table regions to newly brought
+   * up RegionServer 2.2.0 as part of auto-migration done by
+   * {@link #checkIfShouldMoveSystemRegionAsync()}.
+   * "hbase.min.version.move.system.tables" is introduced as part of HBASE-22923.
+   */
+  private final String minVersionToMoveSysTables;
+
+  private static final String MIN_VERSION_MOVE_SYS_TABLES_CONFIG =
+    "hbase.min.version.move.system.tables";
+  private static final String DEFAULT_MIN_VERSION_MOVE_SYS_TABLES_CONFIG = "";
+
   private final Map<ServerName, Set<byte[]>> rsReports = new HashMap<>();
 
   private final boolean shouldAssignRegionsWithFavoredNodes;
@@ -211,6 +236,8 @@ public class AssignmentManager {
     } else {
       this.deadMetricChore = null;
     }
+    minVersionToMoveSysTables = conf.get(MIN_VERSION_MOVE_SYS_TABLES_CONFIG,
+      DEFAULT_MIN_VERSION_MOVE_SYS_TABLES_CONFIG);
   }
 
   public void start() throws IOException, KeeperException {
@@ -1126,7 +1153,23 @@ public class AssignmentManager {
       LOG.debug("Split request from " + serverName +
           ", parent=" + parent + " splitKey=" + Bytes.toStringBinary(splitKey));
     }
-    master.getMasterProcedureExecutor().submitProcedure(createSplitProcedure(parent, splitKey));
+    // Processing this report happens asynchronously from other activities which can mutate
+    // the region state. For example, a split procedure may already be running for this parent.
+    // A split procedure cannot succeed if the parent region is no longer open, so we can
+    // ignore it in that case.
+    // Note that submitting more than one split procedure for a given region is
+    // harmless -- the split is fenced in the procedure handling -- but it would be noisy in
+    // the logs. Only one procedure can succeed. The other procedure(s) would abort during
+    // initialization and report failure with WARN level logging.
+    RegionState parentState = regionStates.getRegionState(parent);
+    if (parentState != null && parentState.isOpened()) {
+      master.getMasterProcedureExecutor().submitProcedure(createSplitProcedure(parent,
+        splitKey));
+    } else {
+      LOG.info("Ignoring split request from " + serverName +
+        ", parent=" + parent + " because parent is unknown or not open");
+      return;
+    }
 
     // If the RS is < 2.0 throw an exception to abort the operation, we are handling the split
     if (master.getServerManager().getVersionNumber(serverName) < 0x0200000) {
@@ -1612,9 +1655,9 @@ public class AssignmentManager {
       regionStateStore.visitMetaForRegion(regionEncodedName, visitor);
       return regionStates.getRegionState(regionEncodedName) == null ? null :
         regionStates.getRegionState(regionEncodedName).getRegion();
-    } catch(IOException e) {
-      LOG.error("Error trying to load region {} from META", regionEncodedName, e);
-      throw new UnknownRegionException("Error while trying load region from meta");
+    } catch (IOException e) {
+      throw new UnknownRegionException(
+          "Error trying to load region " + regionEncodedName + " from META", e);
     }
   }
 
@@ -2214,7 +2257,7 @@ public class AssignmentManager {
   private void acceptPlan(final HashMap<RegionInfo, RegionStateNode> regions,
       final Map<ServerName, List<RegionInfo>> plan) throws HBaseIOException {
     final ProcedureEvent<?>[] events = new ProcedureEvent[regions.size()];
-    final long st = System.currentTimeMillis();
+    final long st = EnvironmentEdgeManager.currentTime();
 
     if (plan.isEmpty()) {
       throw new HBaseIOException("unable to compute plans for regions=" + regions.size());
@@ -2240,7 +2283,7 @@ public class AssignmentManager {
     }
     ProcedureEvent.wakeEvents(getProcedureScheduler(), events);
 
-    final long et = System.currentTimeMillis();
+    final long et = EnvironmentEdgeManager.currentTime();
     if (LOG.isTraceEnabled()) {
       LOG.trace("ASSIGN ACCEPT " + events.length + " -> " +
           StringUtils.humanTimeDiff(et - st));
@@ -2260,27 +2303,42 @@ public class AssignmentManager {
   }
 
   /**
-   * Get a list of servers that this region cannot be assigned to.
-   * For system tables, we must assign them to a server with highest version.
+   * For a given cluster with mixed versions of servers, get a list of
+   * servers with lower versions, where system table regions should not be
+   * assigned to.
+   * For system table, we must assign regions to a server with highest version.
+   * However, we can disable this exclusion using config:
+   * "hbase.min.version.move.system.tables" if checkForMinVersion is true.
+   * Detailed explanation available with definition of minVersionToMoveSysTables.
+   *
+   * @return List of Excluded servers for System table regions.
    */
   public List<ServerName> getExcludedServersForSystemTable() {
     // TODO: This should be a cached list kept by the ServerManager rather than calculated on each
     // move or system region assign. The RegionServerTracker keeps list of online Servers with
     // RegionServerInfo that includes Version.
     List<Pair<ServerName, String>> serverList = master.getServerManager().getOnlineServersList()
-        .stream()
-        .map((s)->new Pair<>(s, master.getRegionServerVersion(s)))
-        .collect(Collectors.toList());
+      .stream()
+      .map(s->new Pair<>(s, master.getRegionServerVersion(s)))
+      .collect(Collectors.toList());
     if (serverList.isEmpty()) {
       return Collections.emptyList();
     }
     String highestVersion = Collections.max(serverList,
       (o1, o2) -> VersionInfo.compareVersion(o1.getSecond(), o2.getSecond())).getSecond();
+    if (!DEFAULT_MIN_VERSION_MOVE_SYS_TABLES_CONFIG.equals(minVersionToMoveSysTables)) {
+      int comparedValue = VersionInfo.compareVersion(minVersionToMoveSysTables,
+        highestVersion);
+      if (comparedValue > 0) {
+        return Collections.emptyList();
+      }
+    }
     return serverList.stream()
-        .filter((p)->!p.getSecond().equals(highestVersion))
-        .map(Pair::getFirst)
-        .collect(Collectors.toList());
+      .filter(pair -> !pair.getSecond().equals(highestVersion))
+      .map(Pair::getFirst)
+      .collect(Collectors.toList());
   }
+
 
   MasterServices getMaster() {
     return master;

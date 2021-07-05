@@ -18,16 +18,22 @@
 package org.apache.hadoop.hbase.master;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.HashMap;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CompatibilityFactory;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
+import org.apache.hadoop.hbase.ServerMetricsBuilder;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.StartMiniClusterOption;
+import org.apache.hadoop.hbase.YouAreDeadException;
+import org.apache.hadoop.hbase.regionserver.RSRpcServices;
 import org.apache.hadoop.hbase.test.MetricsAssertHelper;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.zookeeper.KeeperException;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -37,9 +43,14 @@ import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.hbase.thirdparty.com.google.protobuf.RpcController;
+import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
+
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerStartupRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerStartupResponse;
 
 @Category({ MasterTests.class, MediumTests.class })
 public class TestMasterMetrics {
@@ -61,12 +72,50 @@ public class TestMasterMetrics {
     public MyMaster(Configuration conf) throws IOException, KeeperException, InterruptedException {
       super(conf);
     }
+
+    @Override
+    protected void tryRegionServerReport(long reportStartTime, long reportEndTime) {
+      // do nothing
+    }
+
+    @Override
+    protected RSRpcServices createRpcServices() throws IOException {
+      return new MasterRpcServices(this) {
+
+        @Override
+        public RegionServerStartupResponse regionServerStartup(RpcController controller,
+          RegionServerStartupRequest request) throws ServiceException {
+          RegionServerStartupResponse resp = super.regionServerStartup(controller, request);
+          ServerManager serverManager = getServerManager();
+          // to let the region server actual online otherwise we can not assign meta region
+          new HashMap<>(serverManager.getOnlineServers()).forEach((sn, sm) -> {
+            if (sm.getLastReportTimestamp() <= 0) {
+              try {
+                serverManager.regionServerReport(sn,
+                  ServerMetricsBuilder.newBuilder(sn).setVersionNumber(sm.getVersionNumber())
+                    .setVersion(sm.getVersion())
+                      .setLastReportTimestamp(EnvironmentEdgeManager.currentTime())
+                    .build());
+              } catch (YouAreDeadException e) {
+                throw new UncheckedIOException(e);
+              }
+            }
+          });
+          return resp;
+        }
+      };
+    }
   }
 
   public static class MyRegionServer extends MiniHBaseCluster.MiniHBaseClusterRegionServer {
 
     public MyRegionServer(Configuration conf) throws IOException, InterruptedException {
       super(conf);
+    }
+
+    @Override
+    protected void tryRegionServerReport(long reportStartTime, long reportEndTime) {
+      // do nothing
     }
   }
 
@@ -98,32 +147,36 @@ public class TestMasterMetrics {
     request.setServer(ProtobufUtil.toServerName(serverName));
     long expectedRequestNumber = 10000;
 
-    ClusterStatusProtos.ServerLoad sl = ClusterStatusProtos.ServerLoad.newBuilder()
-      .setTotalNumberOfRequests(expectedRequestNumber).build();
-    request.setLoad(sl);
-
     MetricsMasterSource masterSource = master.getMasterMetrics().getMetricsSource();
-    // Init master source again to reset cluster requests counter
-    masterSource.init();
+    ClusterStatusProtos.ServerLoad sl = ClusterStatusProtos.ServerLoad.newBuilder()
+       .setTotalNumberOfRequests(expectedRequestNumber)
+       .setReadRequestsCount(expectedRequestNumber)
+       .setWriteRequestsCount(expectedRequestNumber).build();
+    request.setLoad(sl);
 
     master.getMasterRpcServices().regionServerReport(null, request.build());
     metricsHelper.assertCounter("cluster_requests", expectedRequestNumber, masterSource);
+    metricsHelper.assertCounter("cluster_read_requests", expectedRequestNumber, masterSource);
+    metricsHelper.assertCounter("cluster_write_requests", expectedRequestNumber, masterSource);
 
     expectedRequestNumber = 15000;
 
-    sl = ClusterStatusProtos.ServerLoad.newBuilder().setTotalNumberOfRequests(expectedRequestNumber)
-      .build();
+    sl = ClusterStatusProtos.ServerLoad.newBuilder()
+            .setTotalNumberOfRequests(expectedRequestNumber)
+            .setReadRequestsCount(expectedRequestNumber)
+            .setWriteRequestsCount(expectedRequestNumber).build();
     request.setLoad(sl);
 
     master.getMasterRpcServices().regionServerReport(null, request.build());
     metricsHelper.assertCounter("cluster_requests", expectedRequestNumber, masterSource);
+    metricsHelper.assertCounter("cluster_read_requests", expectedRequestNumber, masterSource);
+    metricsHelper.assertCounter("cluster_write_requests", expectedRequestNumber, masterSource);
   }
 
   @Test
   public void testDefaultMasterMetrics() throws Exception {
     MetricsMasterSource masterSource = master.getMasterMetrics().getMetricsSource();
-    boolean tablesOnMaster = LoadBalancer.isTablesOnMaster(TEST_UTIL.getConfiguration());
-    metricsHelper.assertGauge("numRegionServers", 1 + (tablesOnMaster ? 1 : 0), masterSource);
+    metricsHelper.assertGauge("numRegionServers", 1, masterSource);
     metricsHelper.assertGauge("averageLoad", 1, masterSource);
     metricsHelper.assertGauge("numDeadRegionServers", 0, masterSource);
     metricsHelper.assertGauge("numDrainingRegionServers", 0, masterSource);

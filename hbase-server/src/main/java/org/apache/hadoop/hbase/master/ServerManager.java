@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -204,8 +205,7 @@ public class ServerManager {
   }
 
   /**
-   * Let the server manager know a regionserver is requesting configurations.
-   * Regionserver will not be added here, but in its first report.
+   * Let the server manager know a new regionserver has come online
    * @param request the startup request
    * @param versionNumber the version number of the new regionserver
    * @param version the version of the new regionserver, could contain strings like "SNAPSHOT"
@@ -228,6 +228,10 @@ public class ServerManager {
     ServerName sn = ServerName.valueOf(hostname, request.getPort(), request.getServerStartCode());
     checkClockSkew(sn, request.getServerCurrentTime());
     checkIsDead(sn, "STARTUP");
+    if (!checkAndRecordNewServer(sn, ServerMetricsBuilder.of(sn, versionNumber, version))) {
+      LOG.warn(
+        "THIS SHOULD NOT HAPPEN, RegionServerStartup" + " could not record the server: " + sn);
+    }
     return sn;
   }
 
@@ -278,6 +282,7 @@ public class ServerManager {
     if (null == this.onlineServers.replace(sn, sl)) {
       // Already have this host+port combo and its just different start code?
       // Just let the server in. Presume master joining a running cluster.
+      // recordNewServer is what happens at the end of reportServerStartup.
       // The only thing we are skipping is passing back to the regionserver
       // the ServerName to use. Here we presume a master has already done
       // that so we'll press on with whatever it gave us for ServerName.
@@ -507,8 +512,7 @@ public class ServerManager {
     ZKWatcher zkw = master.getZooKeeper();
     int onlineServersCt;
     while ((onlineServersCt = onlineServers.size()) > 0){
-
-      if (System.currentTimeMillis() > (previousLogTime + 1000)) {
+      if (EnvironmentEdgeManager.currentTime() > (previousLogTime + 1000)) {
         Set<ServerName> remainingServers = onlineServers.keySet();
         synchronized (onlineServers) {
           if (remainingServers.size() == 1 && remainingServers.contains(sn)) {
@@ -525,7 +529,7 @@ public class ServerManager {
           sb.append(key);
         }
         LOG.info("Waiting on regionserver(s) " + sb.toString());
-        previousLogTime = System.currentTimeMillis();
+        previousLogTime = EnvironmentEdgeManager.currentTime();
       }
 
       try {
@@ -698,8 +702,8 @@ public class ServerManager {
     if (timeout < 0) {
       return;
     }
-    long expiration = timeout + System.currentTimeMillis();
-    while (System.currentTimeMillis() < expiration) {
+    long expiration = timeout + EnvironmentEdgeManager.currentTime();
+    while (EnvironmentEdgeManager.currentTime() < expiration) {
       try {
         RegionInfo rsRegion = ProtobufUtil.toRegionInfo(FutureUtils
           .get(
@@ -736,13 +740,6 @@ public class ServerManager {
     }
 
     int minimumRequired = 1;
-    if (LoadBalancer.isTablesOnMaster(master.getConfiguration()) &&
-        LoadBalancer.isSystemTablesOnlyOnMaster(master.getConfiguration())) {
-      // If Master is carrying regions it will show up as a 'server', but is not handling user-
-      // space regions, so we need a second server.
-      minimumRequired = 2;
-    }
-
     int minToStart = this.master.getConfiguration().getInt(WAIT_ON_REGIONSERVERS_MINTOSTART, -1);
     // Ensure we are never less than minimumRequired else stuff won't work.
     return Math.max(minToStart, minimumRequired);
@@ -777,7 +774,7 @@ public class ServerManager {
       maxToStart = Integer.MAX_VALUE;
     }
 
-    long now =  System.currentTimeMillis();
+    long now = EnvironmentEdgeManager.currentTime();
     final long startTime = now;
     long slept = 0;
     long lastLogTime = 0;
@@ -810,7 +807,7 @@ public class ServerManager {
       // We sleep for some time
       final long sleepTime = 50;
       Thread.sleep(sleepTime);
-      now =  System.currentTimeMillis();
+      now = EnvironmentEdgeManager.currentTime();
       slept = now - startTime;
 
       oldCount = count;
@@ -962,11 +959,19 @@ public class ServerManager {
 
   /**
    * Creates a list of possible destinations for a region. It contains the online servers, but not
-   *  the draining or dying servers.
-   *  @param serversToExclude can be null if there is no server to exclude
+   * the draining or dying servers.
+   * @param serversToExclude can be null if there is no server to exclude
    */
-  public List<ServerName> createDestinationServersList(final List<ServerName> serversToExclude){
-    final List<ServerName> destServers = getOnlineServersList();
+  public List<ServerName> createDestinationServersList(final List<ServerName> serversToExclude) {
+    Set<ServerName> destServers = new HashSet<>();
+    onlineServers.forEach((sn, sm) -> {
+      if (sm.getLastReportTimestamp() > 0) {
+        // This means we have already called regionServerReport at leaset once, then let's include
+        // this server for region assignment. This is an optimization to avoid assigning regions to
+        // an uninitialized server. See HBASE-25032 for more details.
+        destServers.add(sn);
+      }
+    });
 
     if (serversToExclude != null) {
       destServers.removeAll(serversToExclude);
@@ -976,7 +981,7 @@ public class ServerManager {
     final List<ServerName> drainingServersCopy = getDrainingServersList();
     destServers.removeAll(drainingServersCopy);
 
-    return destServers;
+    return new ArrayList<>(destServers);
   }
 
   /**

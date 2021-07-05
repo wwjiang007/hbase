@@ -84,6 +84,7 @@ import org.apache.hadoop.hbase.master.procedure.MasterProcedureUtil.NonceProcedu
 import org.apache.hadoop.hbase.master.procedure.ServerCrashProcedure;
 import org.apache.hadoop.hbase.mob.MobUtils;
 import org.apache.hadoop.hbase.namequeues.BalancerDecisionDetails;
+import org.apache.hadoop.hbase.namequeues.BalancerRejectionDetails;
 import org.apache.hadoop.hbase.namequeues.NamedQueueRecorder;
 import org.apache.hadoop.hbase.namequeues.request.NamedQueueGetRequest;
 import org.apache.hadoop.hbase.namequeues.response.NamedQueueGetResponse;
@@ -459,8 +460,7 @@ public class MasterRpcServices extends RSRpcServices implements
       final String name) throws IOException {
     final Configuration conf = regionServer.getConfiguration();
     // RpcServer at HM by default enable ByteBufferPool iff HM having user table region in it
-    boolean reservoirEnabled = conf.getBoolean(ByteBuffAllocator.ALLOCATOR_POOL_ENABLED_KEY,
-      LoadBalancer.isMasterCanHostUserRegions(conf));
+    boolean reservoirEnabled = conf.getBoolean(ByteBuffAllocator.ALLOCATOR_POOL_ENABLED_KEY, false);
     try {
       return RpcServerFactory.createRpcServer(server, name, getServices(),
           bindAddress, // use final bindAddress for this server.
@@ -599,7 +599,12 @@ public class MasterRpcServices extends RSRpcServices implements
       if (sl != null && master.metricsMaster != null) {
         // Up our metrics.
         master.metricsMaster.incrementRequests(
-          sl.getTotalNumberOfRequests() - (oldLoad != null ? oldLoad.getRequestCount() : 0));
+          sl.getTotalNumberOfRequests() -
+                  (oldLoad != null ? oldLoad.getRequestCount() : 0));
+        master.metricsMaster.incrementReadRequests(sl.getReadRequestsCount() -
+                (oldLoad != null ? oldLoad.getReadRequestsCount() : 0));
+        master.metricsMaster.incrementWriteRequests(sl.getWriteRequestsCount() -
+                (oldLoad != null ? oldLoad.getWriteRequestsCount() : 0));
       }
     } catch (IOException ioe) {
       throw new ServiceException(ioe);
@@ -963,6 +968,12 @@ public class MasterRpcServices extends RSRpcServices implements
       if (execController.getFailedOn() != null) {
         throw execController.getFailedOn();
       }
+
+      String remoteAddress = RpcServer.getRemoteAddress().map(InetAddress::toString).orElse("");
+      User caller = RpcServer.getRequestUser().orElse(null);
+      AUDITLOG.info("User {} (remote address: {}) master service request for {}.{}", caller,
+        remoteAddress, serviceName, methodName);
+
       return CoprocessorRpcUtils.getResponse(execResult, HConstants.EMPTY_BYTE_ARRAY);
     } catch (IOException ie) {
       throw new ServiceException(ie);
@@ -2569,7 +2580,8 @@ public class MasterRpcServices extends RSRpcServices implements
         RegionState.State newState = RegionState.State.convert(s.getState());
         LOG.info("{} set region={} state from {} to {}", master.getClientIdAuditPrefix(), info,
           prevState.getState(), newState);
-        Put metaPut = MetaTableAccessor.makePutFromRegionInfo(info, System.currentTimeMillis());
+        Put metaPut = MetaTableAccessor.makePutFromRegionInfo(info,
+          EnvironmentEdgeManager.currentTime());
         metaPut.addColumn(HConstants.CATALOG_FAMILY, HConstants.STATE_QUALIFIER,
           Bytes.toBytes(newState.name()));
         List<Put> putList = new ArrayList<>();
@@ -3391,6 +3403,16 @@ public class MasterRpcServices extends RSRpcServices implements
           .setLogClassName(balancerDecisionsResponse.getClass().getName())
           .setLogMessage(balancerDecisionsResponse.toByteString())
           .build();
+      }else if (logClassName.contains("BalancerRejectionsRequest")){
+        MasterProtos.BalancerRejectionsRequest balancerRejectionsRequest =
+          (MasterProtos.BalancerRejectionsRequest) method
+            .invoke(null, request.getLogMessage());
+        MasterProtos.BalancerRejectionsResponse balancerRejectionsResponse =
+          getBalancerRejections(balancerRejectionsRequest);
+        return HBaseProtos.LogEntry.newBuilder()
+          .setLogClassName(balancerRejectionsResponse.getClass().getName())
+          .setLogMessage(balancerRejectionsResponse.toByteString())
+          .build();
       }
     } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException
         | InvocationTargetException e) {
@@ -3412,10 +3434,30 @@ public class MasterRpcServices extends RSRpcServices implements
     namedQueueGetRequest.setBalancerDecisionsRequest(request);
     NamedQueueGetResponse namedQueueGetResponse =
       namedQueueRecorder.getNamedQueueRecords(namedQueueGetRequest);
-    List<RecentLogs.BalancerDecision> balancerDecisions =
-      namedQueueGetResponse.getBalancerDecisions();
+    List<RecentLogs.BalancerDecision> balancerDecisions = namedQueueGetResponse != null ?
+      namedQueueGetResponse.getBalancerDecisions() :
+      Collections.emptyList();
     return MasterProtos.BalancerDecisionsResponse.newBuilder()
       .addAllBalancerDecision(balancerDecisions).build();
+  }
+
+  private MasterProtos.BalancerRejectionsResponse getBalancerRejections(
+    MasterProtos.BalancerRejectionsRequest request) {
+    final NamedQueueRecorder namedQueueRecorder = this.regionServer.getNamedQueueRecorder();
+    if (namedQueueRecorder == null) {
+      return MasterProtos.BalancerRejectionsResponse.newBuilder()
+        .addAllBalancerRejection(Collections.emptyList()).build();
+    }
+    final NamedQueueGetRequest namedQueueGetRequest = new NamedQueueGetRequest();
+    namedQueueGetRequest.setNamedQueueEvent(BalancerRejectionDetails.BALANCER_REJECTION_EVENT);
+    namedQueueGetRequest.setBalancerRejectionsRequest(request);
+    NamedQueueGetResponse namedQueueGetResponse =
+      namedQueueRecorder.getNamedQueueRecords(namedQueueGetRequest);
+    List<RecentLogs.BalancerRejection> balancerRejections = namedQueueGetResponse != null ?
+      namedQueueGetResponse.getBalancerRejections() :
+      Collections.emptyList();
+    return MasterProtos.BalancerRejectionsResponse.newBuilder()
+      .addAllBalancerRejection(balancerRejections).build();
   }
 
 }

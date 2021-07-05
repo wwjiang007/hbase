@@ -62,11 +62,11 @@ import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.util.Shell;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import org.apache.hbase.thirdparty.org.eclipse.jetty.http.HttpVersion;
@@ -81,6 +81,7 @@ import org.apache.hbase.thirdparty.org.eclipse.jetty.server.SslConnectionFactory
 import org.apache.hbase.thirdparty.org.eclipse.jetty.server.handler.ContextHandlerCollection;
 import org.apache.hbase.thirdparty.org.eclipse.jetty.server.handler.HandlerCollection;
 import org.apache.hbase.thirdparty.org.eclipse.jetty.server.handler.RequestLogHandler;
+import org.apache.hbase.thirdparty.org.eclipse.jetty.server.handler.gzip.GzipHandler;
 import org.apache.hbase.thirdparty.org.eclipse.jetty.servlet.DefaultServlet;
 import org.apache.hbase.thirdparty.org.eclipse.jetty.servlet.FilterHolder;
 import org.apache.hbase.thirdparty.org.eclipse.jetty.servlet.FilterMapping;
@@ -197,6 +198,7 @@ public class HttpServer implements FilterContainer {
     private String usernameConfKey;
     private String keytabConfKey;
     private boolean needsClientAuth;
+    private String excludeCiphers;
 
     private String hostName;
     private String appDir = APP_DIR;
@@ -374,6 +376,10 @@ public class HttpServer implements FilterContainer {
       return this;
     }
 
+    public void excludeCiphers(String excludeCiphers) {
+      this.excludeCiphers = excludeCiphers;
+    }
+
     public HttpServer build() throws IOException {
 
       // Do we still need to assert this non null name if it is deprecated?
@@ -433,8 +439,13 @@ public class HttpServer implements FilterContainer {
             sslCtxFactory.setTrustStorePath(trustStore);
             sslCtxFactory.setTrustStoreType(trustStoreType);
             sslCtxFactory.setTrustStorePassword(trustStorePassword);
-
           }
+
+          if (excludeCiphers != null && !excludeCiphers.trim().isEmpty()) {
+            sslCtxFactory.setExcludeCipherSuites(StringUtils.getTrimmedStrings(excludeCiphers));
+            LOG.debug("Excluded SSL Cipher List:" + excludeCiphers);
+          }
+
           listener = new ServerConnector(server.webServer, new SslConnectionFactory(sslCtxFactory,
               HttpVersion.HTTP_1_1.toString()), new HttpConnectionFactory(httpsConfig));
         } else {
@@ -575,6 +586,7 @@ public class HttpServer implements FilterContainer {
     this.findPort = b.findPort;
     this.authenticationEnabled = b.securityEnabled;
     initializeWebServer(b.name, b.hostName, b.conf, b.pathSpecs, b);
+    this.webServer.setHandler(buildGzipHandler(this.webServer.getHandler()));
   }
 
   private void initializeWebServer(String name, String hostName,
@@ -660,6 +672,23 @@ public class HttpServer implements FilterContainer {
     ctx.getServletContext().setAttribute(ADMINS_ACL, adminsAcl);
     addNoCacheFilter(ctx);
     return ctx;
+  }
+
+  /**
+   * Construct and configure an instance of {@link GzipHandler}. With complex
+   * multi-{@link WebAppContext} configurations, it's easiest to apply this handler directly to the
+   * instance of {@link Server} near the end of its configuration, something like
+   * <pre>
+   *    Server server = new Server();
+   *    //...
+   *    server.setHandler(buildGzipHandler(server.getHandler()));
+   *    server.start();
+   * </pre>
+   */
+  public static GzipHandler buildGzipHandler(final Handler wrapped) {
+    final GzipHandler gzipHandler = new GzipHandler();
+    gzipHandler.setHandler(wrapped);
+    return gzipHandler;
   }
 
   private static void addNoCacheFilter(WebAppContext ctxt) {

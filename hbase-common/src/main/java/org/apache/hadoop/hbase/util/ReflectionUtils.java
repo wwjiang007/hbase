@@ -52,7 +52,7 @@ public class ReflectionUtils {
     }
   }
 
-  private static <T> T instantiate(final String className, Constructor<T> ctor, Object[] ctorArgs) {
+  public static <T> T instantiate(final String className, Constructor<T> ctor, Object... ctorArgs) {
     try {
       ctor.setAccessible(true);
       return ctor.newInstance(ctorArgs);
@@ -122,7 +122,7 @@ public class ReflectionUtils {
     boolean dumpStack = false;
     if (log.isInfoEnabled()) {
       synchronized (ReflectionUtils.class) {
-        long now = System.currentTimeMillis();
+        long now = EnvironmentEdgeManager.currentTime();
         if (now - previousLogTime >= minInterval * 1000) {
           previousLogTime = now;
           dumpStack = true;
@@ -147,7 +147,7 @@ public class ReflectionUtils {
    * @param stream the stream to
    * @param title a string title for the stack trace
    */
-  private static void printThreadInfo(PrintStream stream,
+  static void printThreadInfo(PrintStream stream,
                                      String title) {
     final int STACK_DEPTH = 20;
     boolean contention = threadBean.isThreadContentionMonitoringEnabled();
